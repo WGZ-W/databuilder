@@ -18,9 +18,12 @@ df = pd.read_parquet(file_path)
 # print(df.drop(columns=['image']).head(2))  # 先不显示 image 列
 
 image_dict = df['image']
-print(image_dict)
+print(type(image_dict))
+# print(image_dict)
 img_dict = df['image'].iloc[0]
 print(img_dict.keys())
+for img_dict in image_dict:
+    print(img_dict['path'])
 print(img_dict['path'])
 img_bytes = img_dict['bytes']
 img = Image.open(io.BytesIO(img_bytes)).convert('RGB')

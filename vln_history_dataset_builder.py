@@ -40,7 +40,12 @@ class Builder(tfds.core.GeneratorBasedBuilder):
                         'image_1': tfds.features.Image(shape=(224, 224, 3)),
                         'image_2': tfds.features.Image(shape=(224, 224, 3)),
                         'image_3': tfds.features.Image(shape=(224, 224, 3)),
-                        # 'images': tfds.features.Sequence(tfds.features.Image(shape=(224, 224, 3))),
+                        # 修改为固定形状的Tensor
+                        'history_images': tfds.features.Tensor(
+                            shape=(8, 224, 224, 3),
+                            dtype=tf.uint8
+                        ),
+                        # 'history_images': tfds.features.Sequence(tfds.features.Image(shape=(224, 224, 3))),
                     },
                     'is_first': tf.bool,
                     'discount': tf.float32,
@@ -53,7 +58,7 @@ class Builder(tfds.core.GeneratorBasedBuilder):
                     'has_image_1': tf.bool,
                     'has_image_2': tf.bool,
                     'has_image_3': tf.bool,
-                    # 'has_images': tf.bool,
+                    'has_history_images': tf.bool,
                     'has_image_0': tf.bool,
                 },
             }),
@@ -124,7 +129,10 @@ class Builder(tfds.core.GeneratorBasedBuilder):
                 # All images
                 # ✅ 从 Parquet 的 'image' 列构建 ID -> 图像映射（基于 path 去后缀）
                 id_to_image = {}
-                for img_dict in df['image']:
+                id_to_timestamp = {}  # 新：图像ID到时间戳（索引）的映射
+                all_images = []
+                # for img_dict in df['image']:
+                for timestamp, img_dict in enumerate(df['image']):
                     if not isinstance(img_dict, dict):
                         continue
                     img_bytes = img_dict.get('bytes')
@@ -133,21 +141,29 @@ class Builder(tfds.core.GeneratorBasedBuilder):
                         continue
                     if isinstance(img_path, bytes):
                         img_path = img_path.decode('utf-8')
+                    # 去掉文件扩展名，提取图像ID
                     img_id = os.path.splitext(os.path.basename(img_path))[0]
+
+                    # 处理图像
                     try:
                         img = Image.open(io.BytesIO(img_bytes)).convert('RGB').resize((224, 224))
+                        # 存储映射
                         id_to_image[img_id] = np.array(img, dtype=np.uint8)
+                        all_images.append(np.array(img, dtype=np.uint8))
+                        id_to_timestamp[img_id] = timestamp  # 记录时间戳
                     except Exception as e:
                         logging.warning(f"图像解码失败: {img_path}, error: {e}")
 
                 # 按 index_list 顺序提取图像
                 images = []
+                timestamps = []  # 每个动作对应的时间戳
                 for img_id in index_list:
                     if img_id not in id_to_image:
                         logging.warning(f"Episode {ep_idx}: 图像 ID '{img_id}' 未找到")
                         images = None
                         break
                     images.append(id_to_image[img_id])
+                    timestamps.append(id_to_timestamp[img_id])
 
                 if images is None or len(images) != len(index_list):
                     continue
@@ -167,9 +183,30 @@ class Builder(tfds.core.GeneratorBasedBuilder):
                     if act_str not in action_dict:
                         continue
 
+                    # 获取当前动作对应的时间戳
+                    current_timestamp = timestamps[t]
+
                     current_kp = max(kp for kp in keypoints if kp <= t)
                     prev_kps = [kp for kp in keypoints if kp < current_kp]
                     last_kp = prev_kps[-1] if prev_kps else current_kp
+
+                    # === 构造 history_images：t 时刻前 8 帧，不足则用 images[0] 前向填充 ===
+                    history_length = 8
+                    start_timestamp = max(0, current_timestamp - history_length)
+                    actual_history = all_images[start_timestamp:current_timestamp]
+                    if len(actual_history) < history_length:
+                        pad_count = history_length - len(actual_history)
+                        if actual_history:
+                            fill_frame = actual_history[0]
+                        else:
+                            fill_frame = all_images[0]
+                        actual_history = [fill_frame] * pad_count + actual_history
+                    # ===================================================================
+                    history_array = np.array(actual_history, dtype=np.uint8)
+
+                    # 确保形状正确
+                    # if history_array.shape != (8, 224, 224, 3):
+                    #     history_array = history_array.reshape((8, 224, 224, 3))
 
                     steps.append({
                         'action': action_dict[act_str],
@@ -181,7 +218,9 @@ class Builder(tfds.core.GeneratorBasedBuilder):
                             'image_1': images[t],
                             'image_2': images[last_kp],
                             'image_3': images[current_kp],
-                            # 'images': images[:t + 1],
+                            # 'history_images': np.array(actual_history, dtype=np.uint8),
+                            'history_images': history_array,
+                            # 'history_images': actual_history,
                         },
                         'is_first': t == 0,
                         'discount': 1.0,
@@ -198,7 +237,7 @@ class Builder(tfds.core.GeneratorBasedBuilder):
                             'has_image_1': True,
                             'has_image_2': True,
                             'has_image_3': True,
-                            # 'has_images': True,
+                            'has_history_images': True,
                             'has_image_0': False,
                         }
                     }
